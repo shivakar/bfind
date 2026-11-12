@@ -20,26 +20,24 @@ func init() {
 	runtime.GOMAXPROCS(*numThreads)
 }
 
-func worker(dtp *StringQueue, fp chan string, sp, wd chan bool, wg *sync.WaitGroup) {
+func worker(dtp *StringQueue, fp chan string, wd chan bool, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	done := false
-	for dtp.Len() > 0 && !done {
-		select {
-		case <-sp:
-			done = true
+	for {
+		dir, ok := dtp.Pop()
+		if !ok {
 			break
-		default:
-			contents, _ := dirContents(dtp.Pop())
-			for _, c := range contents {
-				if ok, _ := isDir(c); ok {
-					dtp.Push(c)
-				}
-				if ok, _ := filter(c); ok {
-					fp <- c
-				}
+		}
+		contents, _ := dirContents(dir)
+		for _, c := range contents {
+			if ok, _ := isDir(c); ok {
+				dtp.Push(c)
+			}
+			if ok, _ := filter(c); ok {
+				fp <- c
 			}
 		}
+		dtp.Done()
 	}
 	wd <- true
 }
@@ -56,7 +54,6 @@ func main() {
 
 	dirsToProcess := NewStringQueue()
 	filteredPaths := make(chan string)
-	stopProcessing := make(chan bool, *numThreads)
 	workerDone := make(chan bool, *numThreads)
 
 	dirs := flag.Args()
@@ -72,7 +69,7 @@ func main() {
 	wg := &sync.WaitGroup{}
 	for i := 0; i < *numThreads; i++ {
 		wg.Add(1)
-		go worker(dirsToProcess, filteredPaths, stopProcessing, workerDone, wg)
+		go worker(dirsToProcess, filteredPaths, workerDone, wg)
 	}
 
 	workerDoneCount := 0
@@ -92,10 +89,8 @@ func main() {
 		}
 	}
 
-	// Sending stop signal to all threads if not already stopped
-	for i := 0; i < *numThreads; i++ {
-		stopProcessing <- true
-	}
+	// Stopping all threads if not already stopped
+	dirsToProcess.Close()
 
 	// Ignoring any values written to filteredPaths
 	go func() {
@@ -108,6 +103,5 @@ func main() {
 	wg.Wait()
 
 	close(filteredPaths)
-	close(stopProcessing)
 	close(workerDone)
 }
