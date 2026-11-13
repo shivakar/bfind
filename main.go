@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -86,6 +87,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] DIRECTORIES...\n", pname)
 		flag.PrintDefaults()
 		os.Exit(1)
+	}
+
+	if *name != "" {
+		re, err := regexp.Compile(*name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid name regex - %s. Error string: %v\n", *name, err)
+			os.Exit(1)
+		}
+		nameRegex = re
 	}
 
 	dirsToProcess := NewStringQueue()
