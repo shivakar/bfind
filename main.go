@@ -3,15 +3,19 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path"
+	"regexp"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 var (
 	name       = flag.String("name", "", "find files with names matching regex (case-senstive)")
-	one        = flag.Bool("1", false, "end after finding the first matching entry")
+	one        = flag.Bool("1", false, "print only the shallowest matching entry (ties broken by name)")
 	numThreads = flag.Int("num-threads", runtime.NumCPU(), "number of threads to process")
 	fileType   = flag.String("type", "", "filter on file type attribute")
 )
@@ -20,26 +24,57 @@ func init() {
 	runtime.GOMAXPROCS(*numThreads)
 }
 
-func worker(dtp *StringQueue, fp chan string, sp, wd chan bool, wg *sync.WaitGroup) {
+func depth(p string) int64 {
+	return int64(strings.Count(p, "/"))
+}
+
+// lowerBound sets b to d if d is smaller than the current value of b
+func lowerBound(b *atomic.Int64, d int64) {
+	for {
+		cur := b.Load()
+		if d >= cur || b.CompareAndSwap(cur, d) {
+			return
+		}
+	}
+}
+
+// shallower reports whether path a comes before path b in -1 mode
+func shallower(a, b string) bool {
+	if depth(a) != depth(b) {
+		return depth(a) < depth(b)
+	}
+	return a < b
+}
+
+// worker processes directories from dtp. In -1 mode, bestDepth holds the depth
+// of the shallowest match so far. The worker skips directories whose entries
+// are deeper than that, so the search does not wait at each level but still
+// finds every match at the shallowest depth.
+func worker(dtp *StringQueue, fp chan string, wd chan bool, wg *sync.WaitGroup, bestDepth *atomic.Int64) {
 	defer wg.Done()
 
-	done := false
-	for dtp.Len() > 0 && !done {
-		select {
-		case <-sp:
-			done = true
+	for {
+		dir, ok := dtp.Pop()
+		if !ok {
 			break
-		default:
-			contents, _ := dirContents(dtp.Pop())
-			for _, c := range contents {
-				if ok, _ := isDir(c); ok {
-					dtp.Push(c)
+		}
+		if *one && depth(dir) >= bestDepth.Load() {
+			dtp.Done()
+			continue
+		}
+		contents, _ := dirContents(dir)
+		for _, c := range contents {
+			if ok, _ := isDir(c); ok {
+				dtp.Push(c)
+			}
+			if ok, _ := filter(c); ok {
+				if *one {
+					lowerBound(bestDepth, depth(c))
 				}
-				if ok, _ := filter(c); ok {
-					fp <- c
-				}
+				fp <- c
 			}
 		}
+		dtp.Done()
 	}
 	wd <- true
 }
@@ -54,9 +89,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *name != "" {
+		re, err := regexp.Compile(*name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid name regex - %s. Error string: %v\n", *name, err)
+			os.Exit(1)
+		}
+		nameRegex = re
+	}
+
 	dirsToProcess := NewStringQueue()
 	filteredPaths := make(chan string)
-	stopProcessing := make(chan bool, *numThreads)
 	workerDone := make(chan bool, *numThreads)
 
 	dirs := flag.Args()
@@ -69,20 +112,25 @@ func main() {
 		dirsToProcess.Push(dir)
 	}
 
+	bestDepth := &atomic.Int64{}
+	bestDepth.Store(math.MaxInt64)
+
 	wg := &sync.WaitGroup{}
 	for i := 0; i < *numThreads; i++ {
 		wg.Add(1)
-		go worker(dirsToProcess, filteredPaths, stopProcessing, workerDone, wg)
+		go worker(dirsToProcess, filteredPaths, workerDone, wg, bestDepth)
 	}
 
+	best := ""
 	workerDoneCount := 0
 	done := false
 	for !done {
 		select {
 		case f := <-filteredPaths:
-			fmt.Fprintf(os.Stdout, "%s\n", f)
-			if *one {
-				done = true
+			if !*one {
+				fmt.Fprintf(os.Stdout, "%s\n", f)
+			} else if best == "" || shallower(f, best) {
+				best = f
 			}
 		case <-workerDone:
 			workerDoneCount++
@@ -91,11 +139,12 @@ func main() {
 			}
 		}
 	}
-
-	// Sending stop signal to all threads if not already stopped
-	for i := 0; i < *numThreads; i++ {
-		stopProcessing <- true
+	if best != "" {
+		fmt.Fprintf(os.Stdout, "%s\n", best)
 	}
+
+	// Stopping all threads if not already stopped
+	dirsToProcess.Close()
 
 	// Ignoring any values written to filteredPaths
 	go func() {
@@ -108,6 +157,5 @@ func main() {
 	wg.Wait()
 
 	close(filteredPaths)
-	close(stopProcessing)
 	close(workerDone)
 }

@@ -11,7 +11,7 @@ go get -u -v github.com/shivakar/bfind
 
 ```
 Usage of bfind:
-  -1    end after finding the first matching entry
+  -1    print only the shallowest matching entry (ties broken by name)
   -name string
         find files with names matching regex (case-senstive)
   -num-threads int

@@ -13,7 +13,7 @@ func filter(entry string) (bool, error) {
 	if err != nil || !match {
 		return false, err
 	}
-	return filterByName(*name, entry)
+	return filterByName(entry), nil
 }
 
 func filterByType(entry string) (bool, error) {
@@ -34,11 +34,14 @@ func filterByType(entry string) (bool, error) {
 	return false, nil
 }
 
-func filterByName(nameRegex, entry string) (bool, error) {
-	if nameRegex == "" {
-		return true, nil
+// nameRegex is the compiled -name flag, or nil to match all entries
+var nameRegex *regexp.Regexp
+
+func filterByName(entry string) bool {
+	if nameRegex == nil {
+		return true
 	}
-	return regexp.MatchString(nameRegex, entry)
+	return nameRegex.MatchString(entry)
 }
 
 func isDir(p string) (bool, error) {
